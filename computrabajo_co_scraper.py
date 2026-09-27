@@ -22,10 +22,10 @@ HOME_URL = BASE_URL + "/"
 
 REQUEST_TIMEOUT = 20
 VERBOSE = True   # True = print every URL fetched, every job found, and every extracted field
-PROCESSED_IDS_FILE = "processed.csv"
-PROGRESS_FILE = "computrabajo_progress.json"   # {"location_index": int, "page": int}
-SCRAPED_JOBS_CSV = "scraped_jobs.csv"          # used when WP credentials aren't set
-DONE_FLAG_FILE = "SCRAPE_COMPLETE.flag"        # created once every location is exhausted
+PROCESSED_IDS_FILE = "co_processed.csv"
+PROGRESS_FILE = "co_computrabajo_progress.json"   # {"location_index": int, "page": int}
+SCRAPED_JOBS_CSV = "co_scraped_jobs.csv"          # used when WP credentials aren't set
+DONE_FLAG_FILE = "co_SCRAPE_COMPLETE.flag"        # created once every location is exhausted
 
 # ── Time budget (for GitHub Actions) ──────────────────────────────────────────
 # A GH Actions job is killed hard at its timeout-minutes limit, mid-request,
@@ -92,7 +92,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 logger.handlers.clear()
 
-_fh = logging.FileHandler("debug.log", encoding="utf-8")
+_fh = logging.FileHandler("co_debug.log", encoding="utf-8")
 _fh.setLevel(logging.DEBUG)
 _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_fh)
@@ -263,35 +263,80 @@ def save_job_to_csv(job: dict):
 # ════════════════════════════════════════════════════════════════════════════
 # STEP 1 — DISCOVER LOCATIONS FROM THE HOMEPAGE
 # ════════════════════════════════════════════════════════════════════════════
+_LOCATION_HREF_RE = re.compile(r"^/empleos-en-[a-z0-9-]+/?$", re.IGNORECASE)
+
+
 def get_location_urls() -> list:
     """
-    Scrapes the "Bolsa de empleo según: Localidad" block on the Colombia
-    homepage, which lists department links (e.g. /empleos-en-antioquia) and
-    their main cities (e.g. /empleos-en-medellin). Returns full URLs,
-    de-duplicated and in the order they appear on the page.
+    Finds the location links (e.g. /empleos-en-<place>) on this country's
+    Computrabajo homepage. Returns full URLs, de-duplicated and in the order
+    they appear on the page.
+
+    FIX: this used to require a specific container — soup.select_one("div.lL")
+    then "ul#content_1 a[href]" inside it — copied from the Colombia scraper
+    without ever being verified against this country's actual homepage
+    markup. When it didn't match, get_location_urls() silently returned [],
+    run() logged "No locations found — aborting" and returned *before* ever
+    calling save_progress() — which is why co_processed.csv could exist
+    (created earlier by load_processed_ids()) while co_computrabajo_progress.json
+    never did.
+
+    Fix: try the original specific container first (harmless if it happens
+    to match), then fall back to scanning the WHOLE homepage for any
+    <a href> matching Computrabajo's shared "/empleos-en-<place>" URL
+    pattern, regardless of which container class/id this country's template
+    wraps it in. If both come up empty, dump the homepage HTML to disk
+    instead of failing silently again.
     """
     logger.info(f"Fetching homepage: {HOME_URL}")
     soup = get_soup(HOME_URL)
 
-    container = soup.select_one("div.lL")
-    if not container:
-        logger.warning("Could not find the location block (div.lL) on the homepage.")
-        return []
-
     seen = set()
     urls = []
-    for a in container.select("ul#content_1 a[href]"):
-        href = a.get("href", "").strip()
-        if not href or href.startswith("http") and BASE_URL not in href:
-            continue
-        full = urljoin(BASE_URL, href)
-        if full not in seen:
-            seen.add(full)
-            urls.append(full)
 
-    logger.info(f"📍 Found {len(urls)} location URLs on the homepage.")
-    for i, u in enumerate(urls):
-        logger.debug(f"    [{i}] {u}")
+    def _collect(anchors):
+        for a in anchors:
+            href = a.get("href", "").strip()
+            if not href or (href.startswith("http") and BASE_URL not in href):
+                continue
+            full = urljoin(BASE_URL, href)
+            if full not in seen:
+                seen.add(full)
+                urls.append(full)
+
+    # Attempt 1 — the original Colombia-shaped container, in case this
+    # country's template happens to match it too.
+    container = soup.select_one("div.lL")
+    if container:
+        _collect(container.select("ul#content_1 a[href]"))
+        if urls:
+            logger.info(f"📍 Found {len(urls)} location URLs via the div.lL container.")
+
+    # Attempt 2 — pattern-based fallback across the whole page. This is what
+    # actually fixes countries whose template doesn't use div.lL / ul#content_1.
+    if not urls:
+        logger.info("div.lL container not found or empty — falling back to a "
+                     "site-wide scan for /empleos-en-<place> links.")
+        _collect(a for a in soup.select("a[href]")
+                  if _LOCATION_HREF_RE.match(urlparse(a.get("href", "")).path or a.get("href", "")))
+
+    if not urls:
+        # Persist the raw HTML so the actual markup can be inspected instead
+        # of guessing again — add this filename to the workflow's commit
+        # step to have it committed back automatically when it happens.
+        debug_path = "co_homepage_debug.html"
+        try:
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(str(soup))
+            logger.error(f"❌ No location URLs found via either method. Homepage HTML "
+                         f"dumped to {debug_path} for inspection.")
+        except OSError as e:
+            logger.error(f"❌ No location URLs found, and failed to write debug HTML: {e}")
+    else:
+        logger.info(f"📍 Found {len(urls)} location URLs on the homepage.")
+        for i, u in enumerate(urls):
+            logger.debug(f"    [{i}] {u}")
+
     return urls
 
 
