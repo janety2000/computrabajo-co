@@ -68,6 +68,15 @@ WP_JOBS_URL    = f"{WP_BASE}/job-listings"
 WP_COMPANY_URL = f"{WP_BASE}/companies"
 WP_MEDIA_URL   = f"{WP_BASE}/media"
 
+# FIX: this script previously had NO X-Internal-Auth support at all — every
+# request it made to WordPress went out without the header your Cloudflare
+# rule checks for, same gap that Ghana/Kenya had until it was fixed on the
+# Nigeria scraper first. Loaded as an *optional* env var (never raises) so
+# the script still runs — just loudly warns — until the secret is added to
+# this repo too.
+_LOCAL_INTERNAL_BOT_KEY = ""   # optional local override, same pattern as the WP_* vars above
+INTERNAL_BOT_KEY = _LOCAL_INTERNAL_BOT_KEY or os.environ.get("INTERNAL_BOT_KEY", "").strip()
+
 JOB_TYPE_MAPPING = {
     "full_time": "full-time", "full-time": "full-time", "fulltime": "full-time",
     "part_time": "part-time", "part-time": "part-time", "parttime": "part-time",
@@ -100,6 +109,15 @@ _ch.setLevel(logging.DEBUG if VERBOSE else logging.INFO)
 _ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_ch)
 
+if INTERNAL_BOT_KEY:
+    logger.info(f"[STARTUP CHECK] INTERNAL_BOT_KEY is SET (length={len(INTERNAL_BOT_KEY)}) "
+                f"— X-Internal-Auth header WILL be sent on every WordPress request.")
+else:
+    logger.warning("[STARTUP CHECK] INTERNAL_BOT_KEY is EMPTY/MISSING "
+                    "— X-Internal-Auth header will NOT be sent. Add it as a GitHub "
+                    "Actions secret for THIS repo if you rely on it to bypass a "
+                    "Cloudflare WAF/rate-limit rule.")
+
 
 def require_wp_config() -> bool:
     """Returns True if WP posting is fully configured, False otherwise.
@@ -126,8 +144,14 @@ SESSION.headers.update(HEADERS)
 
 
 def wp_headers() -> dict:
+    # FIX: previously this returned only Authorization + Content-Type, with
+    # no X-Internal-Auth header at all — so this script's traffic could never
+    # be recognised as "trusted" by any Cloudflare rule checking for it.
     token = base64.b64encode(f"{WP_USER}:{WP_PASSWORD}".encode()).decode()
-    return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
+    if INTERNAL_BOT_KEY:
+        headers["X-Internal-Auth"] = INTERNAL_BOT_KEY
+    return headers
 
 
 def get_soup(url: str, timeout: int = REQUEST_TIMEOUT) -> BeautifulSoup:
