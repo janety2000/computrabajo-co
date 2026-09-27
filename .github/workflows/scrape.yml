@@ -9,16 +9,21 @@ on:
     # instant the current one ends, giving you continuous back-to-back runs
     # without needing a self-retriggering token. Once every location has
     # been scraped, the script exits almost instantly (it sees
-    # SCRAPE_COMPLETE.flag and returns), so these scheduled ticks become a
-    # harmless no-op that costs a few seconds of Actions minutes.
+    # co_SCRAPE_COMPLETE.flag and returns), so these scheduled ticks
+    # become a harmless no-op that costs a few seconds of Actions minutes.
     - cron: "*/15 * * * *"
 
 concurrency:
-  group: computrabajo-scraper
+  # FIX: this MUST be unique per country. If every country workflow shared
+  # the group name "computrabajo-scraper" (as in the original template),
+  # GitHub Actions would treat all 15 country scrapers as ONE queue — only
+  # one country's run could ever be in progress at a time, and the others
+  # would queue behind it indefinitely instead of running in parallel.
+  group: computrabajo-scraper-co
   cancel-in-progress: false    # never kill a run in progress — queue behind it instead
 
 permissions:
-  contents: write               # needed to commit processed.csv / progress.json back to the repo
+  contents: write               # needed to commit co_processed.csv / co_computrabajo_progress.json back to the repo
 
 jobs:
   scrape:
@@ -47,21 +52,45 @@ jobs:
           WP_BASE_URL: ${{ secrets.WP_BASE_URL }}
           WP_USERNAME: ${{ secrets.WP_USERNAME }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          INTERNAL_BOT_KEY: ${{ secrets.INTERNAL_BOT_KEY }}
           # 20000s = ~5h33m. Leaves ~15+ min of headroom inside the 350-min
           # job timeout for checkout/setup/install (~1-2 min) and the commit
           # step below, so the script always has time to save progress and
           # exit cleanly on its own before GitHub would kill it mid-request.
-          INTERNAL_BOT_KEY: ${{ secrets.INTERNAL_BOT_KEY }}
-
           MAX_RUNTIME_SECONDS: "20000"
         run: python computrabajo_co_scraper.py
 
+      # ── FIX ──────────────────────────────────────────────────────────────
+      # The old version of this step listed the UNPREFIXED filenames
+      # (processed.csv, computrabajo_progress.json, scraped_jobs.csv,
+      # SCRAPE_COMPLETE.flag) — but computrabajo_co_scraper.py actually
+      # writes co_processed.csv, co_computrabajo_progress.json, etc.
+      # Only debug.log matched (it was never prefixed), which is why this
+      # step was silently committing debug.log and nothing else. Now it
+      # references the real filenames this script writes, and still only
+      # adds ones that actually exist (so a partial/failed run doesn't crash
+      # this step with "pathspec did not match any files").
       - name: Commit progress back to the repo
         if: always()   # commit whatever progress was made even if the run errored out
         run: |
           git config user.name "computrabajo-scraper-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -A -- processed.csv computrabajo_progress.json scraped_jobs.csv debug.log SCRAPE_COMPLETE.flag
+
+          files=()
+          for f in co_processed.csv co_computrabajo_progress.json co_scraped_jobs.csv co_debug.log co_SCRAPE_COMPLETE.flag co_homepage_debug.html; do
+            if [ -f "$f" ]; then
+              files+=("$f")
+            else
+              echo "ℹ️  $f not present this run — skipping."
+            fi
+          done
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "⚠️  None of the expected output files exist — the scraper likely failed before writing anything. Check the 'Run scraper' step logs."
+            exit 0
+          fi
+
+          git add -A -- "${files[@]}"
           if git diff --cached --quiet; then
             echo "No progress changes to commit."
           else
@@ -73,10 +102,12 @@ jobs:
       - name: Report status
         if: always()
         run: |
-          if [ -f SCRAPE_COMPLETE.flag ]; then
+          if [ -f co_SCRAPE_COMPLETE.flag ]; then
             echo "✅ All locations fully scraped. Future scheduled runs will exit instantly until the flag file is deleted."
-            cat SCRAPE_COMPLETE.flag
+            cat co_SCRAPE_COMPLETE.flag
+          elif [ -f co_homepage_debug.html ]; then
+            echo "🐛 Location discovery found nothing this run — co_homepage_debug.html was committed for inspection."
           else
             echo "⏱ Time budget reached (or run ended) before finishing all locations."
-            echo "The next scheduled run (within ~15 min) will resume automatically from computrabajo_progress.json."
+            echo "The next scheduled run (within ~15 min) will resume automatically from co_computrabajo_progress.json."
           fi
