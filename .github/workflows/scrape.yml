@@ -51,6 +51,8 @@ jobs:
           # job timeout for checkout/setup/install (~1-2 min) and the commit
           # step below, so the script always has time to save progress and
           # exit cleanly on its own before GitHub would kill it mid-request.
+          INTERNAL_BOT_KEY: ${{ secrets.INTERNAL_BOT_KEY }}
+
           MAX_RUNTIME_SECONDS: "20000"
         run: python computrabajo_co_scraper.py
 
