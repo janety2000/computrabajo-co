@@ -14,11 +14,11 @@ on:
     - cron: "*/15 * * * *"
 
 concurrency:
-  # FIX: this MUST be unique per country. If every country workflow shared
-  # the group name "computrabajo-scraper" (as in the original template),
-  # GitHub Actions would treat all 15 country scrapers as ONE queue — only
-  # one country's run could ever be in progress at a time, and the others
-  # would queue behind it indefinitely instead of running in parallel.
+  # This MUST be unique per country. If every country workflow shared
+  # the group name "computrabajo-scraper", GitHub Actions would treat all
+  # country scrapers as ONE queue — only one country's run could ever be
+  # in progress at a time, and the others would queue behind it indefinitely
+  # instead of running in parallel.
   group: computrabajo-scraper-co
   cancel-in-progress: false    # never kill a run in progress — queue behind it instead
 
@@ -60,16 +60,13 @@ jobs:
           MAX_RUNTIME_SECONDS: "20000"
         run: python computrabajo_co_scraper.py
 
-      # ── FIX ──────────────────────────────────────────────────────────────
-      # The old version of this step listed the UNPREFIXED filenames
-      # (processed.csv, computrabajo_progress.json, scraped_jobs.csv,
-      # SCRAPE_COMPLETE.flag) — but computrabajo_co_scraper.py actually
-      # writes co_processed.csv, co_computrabajo_progress.json, etc.
-      # Only debug.log matched (it was never prefixed), which is why this
-      # step was silently committing debug.log and nothing else. Now it
-      # references the real filenames this script writes, and still only
-      # adds ones that actually exist (so a partial/failed run doesn't crash
-      # this step with "pathspec did not match any files").
+      # ── UPDATED ──────────────────────────────────────────────────────────
+      # Now also commits co_fetch_diagnostics.json, the new file the script
+      # writes every time it fetches (or fails to fetch) the homepage. This
+      # is the file to check first if locations are ever empty again — it
+      # records the exact HTTP status, response headers, and a body snippet,
+      # and flags whether the response looks like a Cloudflare/bot-challenge
+      # page rather than the real site.
       - name: Commit progress back to the repo
         if: always()   # commit whatever progress was made even if the run errored out
         run: |
@@ -77,7 +74,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
 
           files=()
-          for f in co_processed.csv co_computrabajo_progress.json co_scraped_jobs.csv co_debug.log co_SCRAPE_COMPLETE.flag co_homepage_debug.html; do
+          for f in co_processed.csv co_computrabajo_progress.json co_scraped_jobs.csv co_debug.log co_SCRAPE_COMPLETE.flag co_homepage_debug.html co_fetch_diagnostics.json; do
             if [ -f "$f" ]; then
               files+=("$f")
             else
@@ -105,8 +102,10 @@ jobs:
           if [ -f co_SCRAPE_COMPLETE.flag ]; then
             echo "✅ All locations fully scraped. Future scheduled runs will exit instantly until the flag file is deleted."
             cat co_SCRAPE_COMPLETE.flag
+          elif [ -f co_fetch_diagnostics.json ] && grep -q '"outcome": "blocked_or_failed"' co_fetch_diagnostics.json; then
+            echo "🚫 Homepage fetch looked blocked/failed — check co_fetch_diagnostics.json for the exact status code, headers and body snippet."
           elif [ -f co_homepage_debug.html ]; then
-            echo "🐛 Location discovery found nothing this run — co_homepage_debug.html was committed for inspection."
+            echo "🐛 Homepage fetched OK but no location links matched — co_homepage_debug.html was committed for inspection."
           else
             echo "⏱ Time budget reached (or run ended) before finishing all locations."
             echo "The next scheduled run (within ~15 min) will resume automatically from co_computrabajo_progress.json."
